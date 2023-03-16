@@ -6,6 +6,9 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/uaccess.h>
+
+#include "stringNum.h"
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -17,26 +20,56 @@ MODULE_VERSION("0.1");
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 92
+#define MAX_LENGTH 300
+#define DEFAULT_SIZE 100
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
-static long long fib_sequence(long long k)
+static int fib_sequence_string(long long k, char __user *buf)
 {
-    /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
-    long long f[k + 2];
-
-    f[0] = 0;
-    f[1] = 1;
-
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
+    if (k == 0) {
+        copy_to_user(buf, "0", 1);
+        return 1;
+    } else if (k == 1) {
+        copy_to_user(buf, "1", 1);
+        return 1;
     }
+    int i = k;
 
-    return f[k];
+    stringNum *arr[3];
+    arr[0] = stringNumInit(DEFAULT_SIZE);
+    arr[1] = stringNumInit(DEFAULT_SIZE);
+    arr[2] = stringNumInit(DEFAULT_SIZE);
+
+    stringToData("0", arr[0]);
+    stringToData("1", arr[1]);
+    stringToData("1", arr[2]);
+
+    stringNum *prev, *curr, *out, *result;
+    prev = arr[0];
+    curr = arr[1];
+    out = arr[2];
+    result = out;
+
+    while (i - 2 > 0) {
+        out = prev;
+        prev = curr;
+        curr = result;
+        stringAdd(prev, curr, out);
+        result = out;
+        i--;
+    }
+    int size = strlen(result->number);
+    copy_to_user(buf, result->number, size);
+
+    stringNumFree(arr[0]);
+    stringNumFree(arr[1]);
+    stringNumFree(arr[2]);
+
+    return size;
 }
 
 static int fib_open(struct inode *inode, struct file *file)
@@ -56,11 +89,11 @@ static int fib_release(struct inode *inode, struct file *file)
 
 /* calculate the fibonacci number at given offset */
 static ssize_t fib_read(struct file *file,
-                        char *buf,
+                        char __user *user_buf,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    return fib_sequence_string(*offset, user_buf);
 }
 
 /* write operation is skipped */
