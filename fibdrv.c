@@ -20,15 +20,68 @@ MODULE_VERSION("0.1");
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 300
-#define DEFAULT_SIZE 100
+#define MAX_LENGTH 92
+#define DEFAULT_SIZE 150
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
+static ktime_t kt;
 
-static int fib_sequence_string(long long k, char __user *buf)
+static long long fib_sequence(long long k)
+{
+    long long *f = kmalloc(sizeof(long long) * (k + 2), GFP_KERNEL);
+
+    f[0] = 0;
+    f[1] = 1;
+
+    for (int i = 2; i <= k; i++) {
+        f[i] = f[i - 1] + f[i - 2];
+    }
+
+    long long result = f[k];
+    kfree(f);
+    return result;
+}
+
+static inline uint64_t fast_doubling(uint32_t target)
+{
+    if (target <= 2)
+        return !!target;
+
+    // fib(2n) = fib(n) * (2 * fib(n+1) − fib(n))
+    // fib(2n+1) = fib(n) * fib(n) + fib(n+1) * fib(n+1)
+    uint64_t n = fast_doubling(target >> 1);
+    uint64_t n1 = fast_doubling((target >> 1) + 1);
+
+    // check 2n or 2n+1
+    if (target & 1)
+        return n * n + n1 * n1;
+    return n * ((n1 << 1) - n);
+}
+
+static inline uint64_t fast_doubling_iter(uint64_t target)
+{
+    if (target <= 2)
+        return !!target;
+
+    // find first 1
+    uint8_t count = 63 - __builtin_clzll(target);
+    uint64_t fib_n0 = 1, fib_n1 = 1;
+
+    for (uint64_t i = count, fib_2n0, fib_2n1, mask; i-- > 0;) {
+        fib_2n0 = fib_n0 * ((fib_n1 << 1) - fib_n0);
+        fib_2n1 = fib_n0 * fib_n0 + fib_n1 * fib_n1;
+
+        mask = -!!(target & (1UL << i));
+        fib_n0 = (fib_2n0 & ~mask) + (fib_2n1 & mask);
+        fib_n1 = (fib_2n0 & mask) + fib_2n1;
+    }
+    return fib_n0;
+}
+
+static long long fib_sequence_string(long long k, char __user *buf)
 {
     if (k == 0) {
         copy_to_user(buf, "0", 1);
@@ -72,6 +125,15 @@ static int fib_sequence_string(long long k, char __user *buf)
     return size;
 }
 
+static long long fib_time_proxy(long long k, char __user *buf)
+{
+    kt = ktime_get();
+    long long result = fast_doubling_iter(k);
+    kt = ktime_sub(ktime_get(), kt);
+
+    return result;
+}
+
 static int fib_open(struct inode *inode, struct file *file)
 {
     if (!mutex_trylock(&fib_mutex)) {
@@ -93,7 +155,7 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    return fib_sequence_string(*offset, user_buf);
+    return (ssize_t) fib_time_proxy(*offset, user_buf);
 }
 
 /* write operation is skipped */
@@ -102,7 +164,7 @@ static ssize_t fib_write(struct file *file,
                          size_t size,
                          loff_t *offset)
 {
-    return 1;
+    return ktime_to_ns(kt);
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
